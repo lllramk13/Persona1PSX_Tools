@@ -56,7 +56,8 @@ def match_format(path, files_map):
 
 def decode_file(path, cfg):
     """返回 (格式名, [(section, start, end, tokens), ...])。"""
-    data = open(path, "rb").read()
+    with open(path, "rb") as f:
+        data = f.read()
     fmt = match_format(path, cfg.get("files", {})) or C.detect_type(data)
     reader = C.READERS.get(fmt)
     if reader is None:

@@ -74,12 +74,53 @@ def read_talk(data):
                 continue
             blocks.append((tbl, tbl, bounds[k + 1]))        # 段k+1：base=段起点（相对指针）
 
+    # 一句完整对话的真边界是 <end>(FF F5)，不是指针。指针只用来定位每段文本区的
+    # 起点(= 最小指针)；旧版按「指针→下一个指针」切，会把 72.5% 的对话从句子中间切开。
+    END_CODE = 0xF5                       # FFF5 = <end>，见 format.json 的 talk 表
+    NL_CODE = 0xF6                        # FFF6 = 换行
+    TALK_CTRL_LEN = {0xFD: 3}             # talk 里唯一带参(3字节)的控制码；其余 FF?? 均 2 字节
+
+    def talk_scan(start, hi):
+        """在 [start, hi) 逐 token 走(避免控制码参数/逃逸字低字节里的 FF F5 误判)，
+        切出所有以 <end> 收尾的完整单元。返回 (units, tail, tail_has_newline):
+          units          = 每个完整单元的 [start, end)(含末尾 FFF5)
+          tail           = 最后一个 <end> 之后剩下的区间，或 None
+          tail_has_newline = 该尾部是否含换行(FFF6)——真对话总是多行的，段边界碎屑不是"""
+        units = []
+        i = unit_start = start
+        tail_has_newline = False
+        while i < hi:
+            b = data[i]
+            if b == 0xFF:                                   # 控制码：按长度整体跳过
+                code = data[i + 1] if i + 1 < len(data) else 0
+                i += TALK_CTRL_LEN.get(code, 2)
+                if code == END_CODE:                        # 到 <end>：切出一条
+                    units.append((unit_start, i))
+                    unit_start = i
+                    tail_has_newline = False
+                elif code == NL_CODE:                       # 尾部有换行 = 真多行对话
+                    tail_has_newline = True
+            elif 0x80 <= b <= 0x87:                         # 逃逸：高位字，两字节
+                i += 2
+            else:                                           # 单字节字
+                i += 1
+        tail = (unit_start, hi) if unit_start < hi else None
+        return units, tail, tail_has_newline
+
     spans = []
     for section, (tbl, base, hi) in enumerate(blocks):
         ptrs = _read_ptr_table(data, tbl, base, lo=tbl, hi=hi)
-        for j, start in enumerate(ptrs):
-            end = ptrs[j + 1] if j + 1 < len(ptrs) else hi
+        if not ptrs:
+            continue
+        units, tail, tail_has_newline = talk_scan(min(ptrs), hi)
+        if not units:
+            continue                                        # 整块没有 <end> = 非对话(假名表/二进制)，丢
+        for start, end in units:
             spans.append((section, start, end))
+        # 段末偶有不以 <end> 收尾的真对话(如 POLUTAR/ZOMBIKO，多行)；只收含换行的，
+        # 丢掉 section 边界处几字节的对齐碎屑(单字节残字/ダミー 片段)。
+        if tail and tail_has_newline:
+            spans.append((section, tail[0], tail[1]))
     return spans
 
 

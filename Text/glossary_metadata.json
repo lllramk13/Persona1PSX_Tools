@@ -1,0 +1,14 @@
+{
+  "engine": "SudachiPy",
+  "sudachipy": "0.6.11",
+  "dictionary": "SudachiDict-core",
+  "dictionary_version": "20260428",
+  "modes": [
+    "C",
+    "A"
+  ],
+  "pos_filter": "part_of_speech()[0] == '名詞'",
+  "candidate_count": 7877,
+  "entry_count": 20110,
+  "min_count": 2
+}

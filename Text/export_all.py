@@ -17,6 +17,7 @@ from collections import Counter
 from pathlib import Path
 
 import dump
+import encode
 
 
 HERE = Path(__file__).resolve().parent
@@ -57,7 +58,9 @@ def export_all(extracted=DEFAULT_EXTRACTED):
         })
         format_counts[fmt] += result["count"]
 
-        for line in result["lines"]:
+        ctrl = cfg["ctrl"].get(fmt, {})
+        for line, (_, _, _, tokens) in zip(result["lines"], decoded):
+            jp, masked, codes = encode.tokens_to_masked(tokens, codetable, ctrl)
             entries.append({
                 "id": f"{source}#{line['id']}",
                 "source": source,
@@ -65,7 +68,9 @@ def export_all(extracted=DEFAULT_EXTRACTED):
                 "local_id": line["id"],
                 "section": line["section"],
                 "span": line["span"],
-                "jp": line["jp"],
+                "jp": jp,
+                "masked": masked,
+                "codes": codes,
             })
 
     codetable_path = Path(dump.CODETABLE)
