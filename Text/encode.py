@@ -42,9 +42,15 @@ class EncodeError(ValueError):
 def encode_slot(slot: int) -> bytes:
     """把 0..2047 字形槽编码成 P1 的字节形式。
 
-    只有 slot ≤ 0x7F 用单字节；其余(含 0x88-0xFE)一律逃逸(0x80+高位, 低位)。
-    游戏对 0x88-0xFE 的单字节【不认】——实测会渲染成别的字，原版所有 ≥0x80 的槽
-    都走逃逸。decode 对单字节 0x88-0xFE 是对称容忍的，但游戏不是，所以编码侧必须逃逸。
+    解码器会容忍原盘里少量裸 ``0x88-0xFE`` 字节，但实机文本渲染
+    对这段裸字节并不按同号字形稳定显示。修改/新增文本时使用保守、
+    与原版主要正文一致的写法：
+
+    - 0x00-0x7F → 单字节
+    - 0x80-0x7FF → 0x80-0x87 + low byte
+
+    原文未修改回插由 ``apply_patch`` 直接保留原始 span 字节，因此不会
+    因为这里的规范写法破坏 byte-exact 对照实验。
     """
     if not 0 <= slot < 2048:
         raise EncodeError(f"字形 slot 越界: {slot}")
@@ -352,6 +358,8 @@ def apply_patch(source, patch_path, destination, codetable_path=None):
     for line_id, markup in patches.items():
         record = records[line_id]
         new_tokens = markup_to_tokens(markup, codetable, ctrl)
+        old_tokens = _strip_filler(record["tokens"], ctrl)
+        new_clean_tokens = _strip_filler(new_tokens, ctrl)
         old_controls = _meaningful_controls(record["tokens"], ctrl)
         new_controls = _meaningful_controls(new_tokens, ctrl)
         if new_controls != old_controls:
@@ -359,8 +367,17 @@ def apply_patch(source, patch_path, destination, codetable_path=None):
                 f"{line_id}: 控制码或参数与原文不一致\n"
                 f"  原: {old_controls}\n  新: {new_controls}")
 
-        encoded = encode_tokens(new_tokens)
         start, end = record["span"]
+
+        # 原文原样回插时必须逐字节保持不变。普通 token 只保存 slot，
+        # 不保存原盘里这个 slot 是短写(如 e2)还是长写(如 80 e2)；
+        # 如果重新 encode，会把一些等价外观规范化，导致控制码字节位置变化。
+        # 因此“内容未变”的补丁直接保留原始 span 字节，作为最干净的对照实验。
+        if new_clean_tokens == old_tokens:
+            expected[(record["section"], start)] = old_tokens
+            continue
+
+        encoded = encode_tokens(new_tokens)
         capacity = end - start
         if len(encoded) > capacity:
             raise EncodeError(
@@ -372,7 +389,7 @@ def apply_patch(source, patch_path, destination, codetable_path=None):
         else:
             filler = b"\x00" * (capacity - len(encoded))
         data[start:end] = encoded + filler
-        expected[(record["section"], start)] = _strip_filler(new_tokens, ctrl)
+        expected[(record["section"], start)] = new_clean_tokens
 
         # 对刚写入的实际字节做第一层精确复读。
         reread = D.decode(data, start, start + len(encoded), ctrl)

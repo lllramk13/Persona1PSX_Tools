@@ -38,6 +38,15 @@ class EncodeTests(unittest.TestCase):
                     self.assertEqual(
                         D.decode(encoded, 0, len(encoded), ctrl), tokens)
 
+    def test_modified_text_low_page_slots_are_escaped(self):
+        """修改文本使用游戏安全写法：0x80-0xFE 都写成 80xx。"""
+        for slot in (0x80, 0x88, 0x9B, 0xE2, 0xFE):
+            with self.subTest(slot=hex(slot)):
+                self.assertEqual(E.encode_slot(slot), bytes([0x80, slot]))
+
+        self.assertEqual(E.encode_slot(0xFF), b"\x80\xFF")
+        self.assertEqual(E.encode_slot(0x100), b"\x81\x00")
+
     def test_markup_roundtrip_representative_files(self):
         for path in self.samples():
             with self.subTest(path=path.name):
@@ -75,12 +84,30 @@ class EncodeTests(unittest.TestCase):
                 encoding="utf-8")
             count, out_fmt = E.apply_patch(source, patch, output)
             self.assertEqual((count, out_fmt), (1, "dfile"))
+            self.assertEqual(output.read_bytes(), source.read_bytes())
             out_fmt, out_decoded = dump.decode_file(str(output), self.cfg)
             out_record = E._line_records(out_decoded)[0]
             self.assertEqual(out_fmt, "dfile")
             self.assertEqual(
                 E._strip_filler(out_record["tokens"], ctrl),
                 E._strip_filler(record["tokens"], ctrl))
+
+    def test_patch_copy_e0_is_byte_exact(self):
+        """E 文件原文回插不能规范化 80xx/xx 等价写法。"""
+        source = ROOT / "extrac/ADV/E0.BIN"
+        fmt, decoded = dump.decode_file(str(source), self.cfg)
+        ctrl = self.cfg["ctrl"][fmt]
+        record = E._line_records(decoded)[0]
+        markup = E.tokens_to_markup(record["tokens"], self.codetable, ctrl)
+        with tempfile.TemporaryDirectory() as td:
+            patch = Path(td) / "patch.json"
+            output = Path(td) / "E0.copy.BIN"
+            patch.write_text(json.dumps({"lines": [{
+                "id": record["id"], "zh": markup,
+            }]}, ensure_ascii=False), encoding="utf-8")
+            count, out_fmt = E.apply_patch(source, patch, output)
+            self.assertEqual((count, out_fmt), (1, "efile"))
+            self.assertEqual(output.read_bytes(), source.read_bytes())
 
     def test_real_chinese_replacement_and_rescan(self):
         """日版字库现有“中文”两字；用它们做一次真正的改字回插。"""
