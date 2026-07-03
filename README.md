@@ -22,22 +22,34 @@ P1_Tools/
 │   ├── codetable_og.json   slot→字 码表（2048 条，已基本补全，是 dump 出真文本的依据）
 │   ├── extract_codetable.py 从 FONT.BIN 渲染字模到 font_grid.png
 │   └── font_grid.png
-├── Text/                文本工具（见 §4）
+├── Text/                文本提取/编码工具（见 §4）
 │   ├── decode.py containers.py format.json dump.py
 │   ├── encode.py             可逆编码、模板导出、安全原位回插
 │   ├── test_encode.py        encoder round-trip / 容器复扫测试
 │   ├── sync_translations.py  从 all_text 同步最小翻译表，保留已有 zh
 │   ├── build_glossary_candidates.py  重复术语/名称表候选提取
 │   ├── export_all.py      一次性汇总全部文本并标记来源
-│   ├── e0.json ... e3.json 日版主线文本 dump（共 1170 块）
-│   ├── d00.json ... d24.json 日版地图文本 dump（23 文件，共 53 块）
-│   ├── slps.json          主程序内已确认文本（832 条）
-│   ├── all_text.json      全部来源汇总（schema/计数/码表 sha256 头 + 20110 条；每条带 jp/masked/codes）
+│   ├── all_text.json      全部来源汇总（schema/计数/码表 sha256 头 + 20110 条；每条带 jp/masked/codes；e0-e3/d00-d24/slps 的单文件 dump 用 dump.py 现生成）
 │   ├── translations.json   人工维护的 P2EP 式遮罩翻译表
 │   ├── glossary_candidates.json  术语频次、上下文和唯一中译工作表
 │   ├── glossary_frequency.json   仅保留 jp/count 的术语频次表
 │   ├── glossary_metadata.json    Sudachi/词典版本与切分参数
 │   └── p1p_en_text_dump/   前人英版文本提取（crib，对照用，见 §6）
+├── Text_inject/         回插管道（任意长度时代，见 §3.2b）
+│   ├── ebin_rebuild.py      E 段重建器：文本任意伸缩 + 指针重定位（--verify 恒等自测 / --units 看单元）
+│   ├── exp_grow_e0s0.py     首个实机加长实验（+8 字节已验证；也是调用范例）
+│   ├── build_test_disc.py   等长补丁按 LBA 写回光盘镜像（read/write helpers 供复用）
+│   ├── sync_json.py         翻译批次合并（校验占位符 + 去重扩散）
+│   ├── translations/        人工翻译批次（{id:{jp,zh}}，经 sync_json.py 合并）
+│   └── wqy-zenhei.ttc       文泉驿正黑（gitignore；渲染中文字形用，http://wenq.org 免费下载）
+├── re_tools/            逆向工具
+│   ├── adv.py               ADV.BIN 反汇编工作台（capstone；dis/table 两个命令）
+│   └── validate_script.py   816 个 E 段脚本图遍历静态验证器
+├── docs/
+│   ├── NEXT_STEPS_接力手册.md   现状/路线图/TODO/练习题（新会话从这看）
+│   ├── RE_Walkthrough_EBIN.md   E 脚本 VM 逆向全过程复盘（教程）
+│   └── EBIN_Structure.md        前人对 E 文件结构的黑盒笔记
+├── gen_index.py         从成品盘 ISO 目录重建 FSECT/FSIZE.DAT（镜像扩容层备用）
 ├── requirements.txt      锁定 SudachiPy + core 词典版本
 └── README.md            本文件
 ```
@@ -291,7 +303,7 @@ handler，一样按长度表推进。**记录长度表在 RAM `0x800BAC90`（ADV
 **段模型**（对重建器至关重要）：
 - 段整体加载到 `0x80100000`；ADV.BIN 代码硬编码的段内偏移**全部 < 0x10C8**（段头 0x1F8 +
   元数据区几个字段；`lui 0x8010` 全普查），SLPS 主程序 0 处引用 → **[0, 0x10C8) 是不可移动
-  的固定前缀，0x10C8 之后只经指针访问、可自由重排**（与 `EBIN_Structure.md` 的 0x10C8 观察吻合）。
+  的固定前缀，0x10C8 之后只经指针访问、可自由重排**（与 `docs/EBIN_Structure.md` 的 0x10C8 观察吻合）。
 - 段头本身就是运行时结构（`0x80100034` 被直接当 struct 用）：+0x40/+0x48 是事件入口表指针、
   +0x60 是脚本入口、**+0x4（即 `header[1]`）指向段内容结束位置**（增长段时经重定位自动更新）。
 - **一个 reader span 实为多个背靠背文本单元**：每个单元被 FF55/FF58/选项 resume 指针独立引用，
