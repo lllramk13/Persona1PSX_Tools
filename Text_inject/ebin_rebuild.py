@@ -75,7 +75,8 @@ class Section:
         self.raw = raw
         self.size = len(raw)
         self.spans = sorted(spans)                  # reader 的文本 span（段内偏移）
-        self.ptr_sites = self._scan_pointers()      # [(site_off, target_off)]
+        self.ptr_sites = self._scan_pointers()      # [(site_off, target_off)] 全部像指针的字
+        self.text_targets = self._text_targets()    # 只有真 FF55/FF58 引用的文本单元起点
         self.units = self._split_units()            # [(start, end)] 可替换文本单元
 
     # -- 解析 --------------------------------------------------------------
@@ -94,9 +95,24 @@ class Section:
                 sites.append((o, v - RAM))
         return sites
 
+    def _text_targets(self) -> set[int]:
+        """真正的文本单元起点 = FF55(显示文本)/FF58(存文本指针) 记录的指针操作数。
+
+        _scan_pointers 会把段头结构表、脚本区里巧合成 0x8010xxxx 的字也收进来（重定位
+        时全都要修），但它们不是文本单元边界——用它们切会把词剁成单字碎片
+        （っ/て/ね）。FF55/FF58 的指针操作数固定在记录 +4，记录 4 字节对齐。
+        """
+        tgts = set()
+        for site, _ in self.ptr_sites:
+            head = site - 4                          # 指针在 +4，故记录头在 site-4
+            if (head >= 0 and head % 4 == 0 and self.raw[head] == 0xFF
+                    and self.raw[head + 1] in (0x55, 0x58)):
+                tgts.add(struct.unpack_from("<I", self.raw, site)[0] - RAM)
+        return tgts
+
     def _split_units(self) -> list[tuple[int, int]]:
-        """reader span 按指针目标切分成引擎实际引用的文本单元。"""
-        targets = sorted({t for _, t in self.ptr_sites})
+        """reader span 只按真文本指针（FF55/FF58 目标）切成可替换单元。"""
+        targets = sorted(self.text_targets)
         units = []
         for a, b in self.spans:
             cuts = [a] + [t for t in targets if a < t < b] + [b]
@@ -138,23 +154,28 @@ class Section:
             out.extend(new if new is not None else self.raw[a:b])
         replaced = {a for a, b, new in blocks if new is not None}
 
-        # 2) 旧偏移 → 新偏移
-        def remap(off: int) -> int:
+        # 2) 旧偏移 → 新偏移。target 落在被替换单元内部时返回 None = 噪声指针，
+        #    跳过重定位、原样保留其旧值（文本只被 FF55/FF58 引用且都指向单元起点；
+        #    落进被换文本内部的 0x8010xxxx 一定是段头结构/文字巧合，不是真文本指针）。
+        def remap(off: int, *, is_site: bool) -> "int | None":
             if off < FIXED_PREFIX:
                 return off
             for a, b, ns in block_map:
                 if a <= off < b:
                     if a in replaced and off != a:
-                        raise ValueError(
-                            f"指针指向被替换单元 {a:#x} 的内部 +{off - a:#x}，"
-                            f"当前只支持单元起点")
+                        if is_site:                  # site 在 span 外，绝不该落进被换单元
+                            raise ValueError(
+                                f"指针 site {off:#x} 落在被替换单元内部（不应发生）")
+                        return None                  # 噪声目标：跳过
                     return ns + (off - a)
             raise ValueError(f"指针目标 {off:#x} 无法映射")
 
-        # 3) 重定位所有指针字（site 自身位置也要先映射到新布局）
+        # 3) 重定位所有指针字（site 位置先映射到新布局；目标是被换单元内部的跳过）
         for site, target in self.ptr_sites:
-            new_site = remap(site)
-            struct.pack_into("<I", out, new_site, RAM + remap(target))
+            new_target = remap(target, is_site=False)
+            if new_target is None:                   # 噪声指针：verbatim 已复制其旧值，不动
+                continue
+            struct.pack_into("<I", out, remap(site, is_site=True), RAM + new_target)
         return bytes(out)
 
 
