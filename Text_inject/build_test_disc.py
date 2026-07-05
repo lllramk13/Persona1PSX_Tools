@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""把 P1 的等长 FONT/E0 测试补丁写回 2352-byte MODE2 光盘镜像。
+"""把 P1 的等长补丁合进一张 2352-byte MODE2 测试盘（唯一写盘入口）。
 
-始终从日版 Rev 1 原盘复制生成测试盘；写入前用 extrac 中的原文件校验 LBA，
-写入后再逐字节回读。只替换每扇区偏移 24 的 2048 字节用户数据，保留扇区头。
-当前不重算 EDC/ECC，目标是 DuckStation 测试盘。
+各生产者（build_e0_font.py 的 render_font、E 段重建器…）只负责把 patched bin
+落到 out/；本模块按 PATCHES 清单把它们全部写进同一张 [ZH-test].bin：始终从日版
+Rev 1 原盘复制，写前用 extrac 原文件校验每个补丁的 LBA，写后逐字节回读。只替换
+每扇区偏移 24 的 2048 字节用户数据，保留扇区头。out/ 里缺席的补丁自动跳过，可
+增量合盘。当前不重算 EDC/ECC，目标是 DuckStation 测试盘。
+
+补丁必须等长（字节数 == 原文件，即没撑破原扇区数）。哪天某文件需要更多扇区，
+下面的等长断言会在这里报错，那正是接入“合盘/扩容层”（gen_index.py +
+FSECT/FSIZE.DAT）的地方。也可当库用：read_user_data / write_user_data / DISC_SOURCE。
 """
 
 from __future__ import annotations
@@ -65,7 +71,11 @@ def build_test_disc() -> Path:
         raise ValueError("原盘大小不是 2352 字节扇区的整数倍")
 
     loaded = []
+    skipped = []
     for name, lba, original_path, patched_path in PATCHES:
+        if not patched_path.is_file():
+            skipped.append(name)
+            continue
         original = original_path.read_bytes()
         patched = patched_path.read_bytes()
         if len(original) != len(patched):
@@ -77,6 +87,12 @@ def build_test_disc() -> Path:
                 f"{name} 的原盘 LBA 校验失败: disc={sha256(on_disc)}, "
                 f"extrac={sha256(original)}")
         loaded.append((name, lba, patched))
+
+    if skipped:
+        print(f"⏭  跳过未产出的补丁: {', '.join(skipped)}（先运行对应生产者）")
+    if not loaded:
+        raise FileNotFoundError(
+            "out/ 里没有任何补丁；先运行生产者（如 python3 build_e0_font.py）")
 
     # 每次从干净原盘重建，避免旧测试补丁残留或 FONT/E0 版本错配。
     shutil.copyfile(DISC_SOURCE, DISC_OUTPUT)
