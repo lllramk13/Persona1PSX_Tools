@@ -17,6 +17,33 @@ token 形式：
 """
 
 
+def decode_with_offsets(data, start, end, ctrl):
+    """解码并保留每个 token 的绝对字节起点。
+
+    返回 ``[(offset, token), ...]``。FF55/FF58 给出的是字节地址；只有这份
+    精确偏移才能把脚本入口转换成翻译视图里的 breakpoint，不能按字符宽度猜。
+    """
+    out = []
+    i = start
+    while i < end:
+        off = i
+        b = data[i]
+        if b == 0xFF:
+            code = data[i + 1] if i + 1 < len(data) else 0
+            length = ctrl.get(code, (None, 2))[1]
+            token = ("ctrl", code, bytes(data[i + 2:i + length]))
+            i += length
+        elif 0x80 <= b <= 0x87:
+            lo = data[i + 1] if i + 1 < len(data) else 0
+            token = ("char", (b - 0x80) * 256 + lo)
+            i += 2
+        else:
+            token = ("char", b)
+            i += 1
+        out.append((off, token))
+    return out
+
+
 def decode(data, start, end, ctrl):
     """
     data       : 整个文件 bytes
@@ -24,29 +51,7 @@ def decode(data, start, end, ctrl):
     ctrl       : {控制码byte(int): (名字str, 整条长度int)}；未在表里的 FF?? 默认按 2 字节吃
     返回        : token 列表
     """
-    out = []
-    i = start
-    while i < end:
-        b = data[i]
-
-        if b == 0xFF:                                       # —— 控制码 ——
-            code = data[i + 1] if i + 1 < len(data) else 0
-            length = ctrl.get(code, (None, 2))[1]           # 只取长度；含义在渲染时查
-            params = bytes(data[i + 2:i + length])          # 控制码后面跟的参数
-            out.append(("ctrl", code, params))
-            i += length
-
-        elif 0x80 <= b <= 0x87:                             # —— 逃逸：高位字（两字节）——
-            lo = data[i + 1] if i + 1 < len(data) else 0
-            slot = (b - 0x80) * 256 + lo
-            out.append(("char", slot))
-            i += 2
-
-        else:                                               # —— 单字节：直接就是 slot ——
-            out.append(("char", b))
-            i += 1
-
-    return out
+    return [token for _, token in decode_with_offsets(data, start, end, ctrl)]
 
 
 # 控制码名字属于这几类时，渲染文本输出真换行，便于阅读

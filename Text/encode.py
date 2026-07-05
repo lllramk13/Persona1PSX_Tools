@@ -32,6 +32,7 @@ import dump
 SLOT_RE = re.compile(r"\{(\d+)\}")
 TAG_RE = re.compile(r"<([A-Za-z0-9_?]+)(?::([0-9A-Fa-f]*))?>")
 MARK_RE = re.compile(r"⟦(\d+)⟧")
+BREAK_RE = re.compile(r"⟪B(\d+)⟫")
 NEWLINE_NAMES = {"nl", "newline"}
 
 
@@ -121,7 +122,7 @@ def tokens_to_markup(tokens, codetable, ctrl, include_padding=False):
     return "".join(parts)
 
 
-def tokens_to_masked(tokens, codetable, ctrl):
+def tokens_to_masked(tokens, codetable, ctrl, break_before=None):
     """生成 P2EP 同款的 ``(jp, masked, codes)`` 翻译视图。
 
     ``jp`` 保留可逆控制码，``masked`` 只露出 ``⟦0⟧`` 占位符，
@@ -134,6 +135,7 @@ def tokens_to_masked(tokens, codetable, ctrl):
            ctrl.get(work[-1][1], (None, 2))[0] == "pad"):
         work.pop()
 
+    break_before = break_before or {}
     raw_parts = []
     masked_parts = []
     codes = []
@@ -144,7 +146,10 @@ def tokens_to_masked(tokens, codetable, ctrl):
         raw_parts.append(code)
         masked_parts.append(f"⟦{index}⟧")
 
-    for token in work:
+    for token_index, token in enumerate(work):
+        for marker in break_before.get(token_index, ()):
+            raw_parts.append(marker)
+            masked_parts.append(marker)
         if token[0] == "char":
             slot = token[1]
             text = codetable.get(slot, "")
@@ -173,6 +178,17 @@ def tokens_to_masked(tokens, codetable, ctrl):
             protect(f"<{name}{suffix}>")
 
     return "".join(raw_parts), "".join(masked_parts), codes
+
+
+def breakpoint_numbers(text):
+    return [int(match.group(1)) for match in BREAK_RE.finditer(text)]
+
+
+def validate_breakpoints(text, count):
+    actual = breakpoint_numbers(text)
+    wanted = list(range(count))
+    if actual != wanted:
+        raise EncodeError(f"breakpoint 序列不一致: 期望 {wanted}，实际 {actual}")
 
 
 def restore_masked(text, codes):
@@ -209,6 +225,12 @@ def markup_to_tokens(text, codetable, ctrl):
             i += 1
             continue
 
+        # 翻译视图把空白字形 slot 0 显示为普通空格；编码时做逆变换。
+        if text[i] == " " and not codetable.get(0, ""):
+            out.append(("char", 0))
+            i += 1
+            continue
+
         slot_match = SLOT_RE.match(text, i)
         if slot_match:
             slot = int(slot_match.group(1))
@@ -225,22 +247,26 @@ def markup_to_tokens(text, codetable, ctrl):
                 # 保留这个原始形式，使 TALK 生僻控制码也能往返。
                 raw_code = re.fullmatch(r"FF([0-9A-Fa-f]{2})\?", name)
                 if not raw_code:
-                    raise EncodeError(
-                        f"未知控制码标签 {tag_match.group(0)!r}，位置 {i}")
-                code, length = int(raw_code.group(1), 16), 2
+                    # ``<SPRIT>`` 等也可能只是游戏正文。未知标签退回普通
+                    # 码表字符的最长匹配，不把所有尖括号文字都误判成控制码。
+                    tag_match = None
+                else:
+                    code, length = int(raw_code.group(1), 16), 2
             else:
                 code, length = by_name[name]
-            raw_params = raw_params or ""
-            if len(raw_params) % 2:
-                raise EncodeError(f"控制码参数必须是偶数个十六进制字符: {tag_match.group(0)}")
-            params = bytes.fromhex(raw_params)
-            expected = length - 2
-            if len(params) != expected:
-                raise EncodeError(
-                    f"<{name}> 需要 {expected} 字节参数，实际 {len(params)} 字节")
-            out.append(("ctrl", code, params))
-            i = tag_match.end()
-            continue
+            if tag_match is not None:
+                raw_params = raw_params or ""
+                if len(raw_params) % 2:
+                    raise EncodeError(
+                        f"控制码参数必须是偶数个十六进制字符: {tag_match.group(0)}")
+                params = bytes.fromhex(raw_params)
+                expected = length - 2
+                if len(params) != expected:
+                    raise EncodeError(
+                        f"<{name}> 需要 {expected} 字节参数，实际 {len(params)} 字节")
+                out.append(("ctrl", code, params))
+                i = tag_match.end()
+                continue
 
         matched = None
         for value in values:

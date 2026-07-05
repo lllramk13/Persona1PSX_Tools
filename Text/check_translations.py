@@ -23,6 +23,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TABLE = HERE / "translations.json"
 MARK = re.compile(r"⟦(\d+)⟧")
+BREAK = re.compile(r"⟪B(\d+)⟫")
 
 
 def placeholder_report(jp: str, zh: str):
@@ -69,14 +70,24 @@ def main() -> None:
     if len(ph_errors) > 30:
         print(f"   …还有 {len(ph_errors)-30} 条")
 
-    # 2) 重复句冲突
+    bp_errors = []
+    for k, v in items:
+        wanted = [int(n) for n in BREAK.findall(v["jp"])]
+        got = [int(n) for n in BREAK.findall(v["zh"])]
+        if got != wanted:
+            bp_errors.append((k, wanted, got))
+    print(f"\n② breakpoint 错误: {len(bp_errors)} 条")
+    for k, wanted, got in bp_errors[:30]:
+        print(f"   {k}: 期望 {wanted}，实际 {got}")
+
+    # 3) 重复句冲突
     jp_to_zh = defaultdict(set)
     jp_to_ids = defaultdict(list)
     for k, v in items:
         jp_to_zh[v["jp"]].add(v["zh"])
         jp_to_ids[v["jp"]].append(k)
     conflicts = {jp: zhs for jp, zhs in jp_to_zh.items() if len(zhs) > 1}
-    print(f"\n② 同句多译（需统一）: {len(conflicts)} 组")
+    print(f"\n③ 同句多译（需统一）: {len(conflicts)} 组")
     for jp, zhs in list(conflicts.items())[:20]:
         print(f"   日文: {jp[:50]}  （{len(jp_to_ids[jp])} 处）")
         for z in list(zhs):
@@ -88,18 +99,19 @@ def main() -> None:
     all_items = [(k, v) for k, v in table.items() if k.startswith(args.scope)]
     fanout = [k for k, v in all_items
               if not v.get("zh") and v["jp"] in filled_jp and v["jp"] not in conflicts]
-    print(f"\n③ 可自动扩散填充的空条目: {len(fanout)}（跑 sync_json.py --apply 自动填）")
+    print(f"\n④ 可自动扩散填充的空条目: {len(fanout)}（跑 sync_json.py --apply 自动填）")
 
     # 4) 可选：疑似人名不一致（同一说话人前缀 "X:" 的不同译名）
     if args.names:
-        print("\n④ 疑似人名不一致（同一 jp 说话人前缀译法不同已并入②；此处略）")
+        print("\n⑤ 疑似人名不一致（同一 jp 说话人前缀译法不同已并入③；此处略）")
 
-    n_bad = len(ph_errors) + len(conflicts)
+    n_bad = len(ph_errors) + len(bp_errors) + len(conflicts)
     print(f"\n{'='*40}")
     if n_bad == 0:
-        print("✅ 无占位符错误、无同句冲突。可以进回插。")
+        print("✅ 无占位符/breakpoint 错误、无同句冲突。可以进回插。")
         sys.exit(0)
-    print(f"⚠ 共 {len(ph_errors)} 处占位符错误 + {len(conflicts)} 组同句冲突需修。")
+    print(f"⚠ 共 {len(ph_errors)} 处占位符错误 + {len(bp_errors)} 处 breakpoint 错误 "
+          f"+ {len(conflicts)} 组同句冲突需修。")
     sys.exit(1)
 
 

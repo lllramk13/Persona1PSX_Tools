@@ -18,6 +18,11 @@ from pathlib import Path
 
 import dump
 import encode
+import decode
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "Text_inject"))
+from ebin_rebuild import EFile  # noqa: E402
 
 
 HERE = Path(__file__).resolve().parent
@@ -49,6 +54,8 @@ def export_all(extracted=DEFAULT_EXTRACTED):
 
     for path in source_files(extracted):
         fmt, decoded = dump.decode_file(str(path), cfg)
+        raw = path.read_bytes()
+        efile = EFile(path) if fmt == "efile" else None
         result = dump.to_json(str(path), fmt, decoded, cfg, codetable)
         source = path.relative_to(extracted).as_posix()
         sources.append({
@@ -59,9 +66,37 @@ def export_all(extracted=DEFAULT_EXTRACTED):
         format_counts[fmt] += result["count"]
 
         ctrl = cfg["ctrl"].get(fmt, {})
-        for line, (_, _, _, tokens) in zip(result["lines"], decoded):
-            jp, masked, codes = encode.tokens_to_masked(tokens, codetable, ctrl)
-            entries.append({
+        for line, (section, start, end, tokens) in zip(result["lines"], decoded):
+            break_before = {}
+            breakpoints = []
+            if efile is not None:
+                sec_base = efile.sections[section][0]
+                sec = efile.section(section)
+                targets = sorted(sec_base + target for target in sec.text_targets
+                                 if start < sec_base + target < end)
+                pairs = decode.decode_with_offsets(raw, start, end, ctrl)
+                for number, target in enumerate(targets):
+                    token_index = None
+                    placement = "unknown"
+                    for i, (off, token) in enumerate(pairs):
+                        next_off = pairs[i + 1][0] if i + 1 < len(pairs) else end
+                        if off <= target < next_off:
+                            token_index = i
+                            placement = "exact" if target == off else f"inside_{token[0]}"
+                            break
+                    if token_index is None:
+                        raise ValueError(
+                            f"{source}#{line['id']}: 无法定位 FF55/58 target {target:#x}")
+                    marker = f"⟪B{number}⟫"
+                    break_before.setdefault(token_index, []).append(marker)
+                    breakpoints.append({
+                        "id": f"B{number}",
+                        "offset": target - start,
+                        "placement": placement,
+                    })
+            jp, masked, codes = encode.tokens_to_masked(
+                tokens, codetable, ctrl, break_before)
+            entry = {
                 "id": f"{source}#{line['id']}",
                 "source": source,
                 "format": fmt,
@@ -71,11 +106,14 @@ def export_all(extracted=DEFAULT_EXTRACTED):
                 "jp": jp,
                 "masked": masked,
                 "codes": codes,
-            })
+            }
+            if breakpoints:
+                entry["breakpoints"] = breakpoints
+            entries.append(entry)
 
     codetable_path = Path(dump.CODETABLE)
     return {
-        "schema": 1,
+        "schema": 2,
         "extracted_root": "extrac",
         "codetable": "Codetable/codetable_og.json",
         "codetable_sha256": hashlib.sha256(codetable_path.read_bytes()).hexdigest(),

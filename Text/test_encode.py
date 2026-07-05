@@ -47,6 +47,16 @@ class EncodeTests(unittest.TestCase):
         self.assertEqual(E.encode_slot(0xFF), b"\x80\xFF")
         self.assertEqual(E.encode_slot(0x100), b"\x81\x00")
 
+    def test_translation_space_roundtrips_as_slot_zero(self):
+        tokens = E.markup_to_tokens(" ", self.codetable, self.cfg["ctrl"]["efile"])
+        self.assertEqual(tokens, [("char", 0)])
+
+    def test_literal_angle_bracket_text_is_not_forced_to_control(self):
+        tokens = E.markup_to_tokens(
+            "<SPRIT>", self.codetable, self.cfg["ctrl"]["efile"])
+        shown = D.tokens_to_text(tokens, self.codetable, self.cfg["ctrl"]["efile"])
+        self.assertEqual(shown, "<SPRIT>")
+
     def test_markup_roundtrip_representative_files(self):
         for path in self.samples():
             with self.subTest(path=path.name):
