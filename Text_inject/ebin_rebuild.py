@@ -3,10 +3,11 @@
 
 依据 ADV.BIN 反汇编实锤的引擎事实（详见 README §3.2b）：
 
-  · 段整体加载到 RAM 0x80100000；段内一切交叉引用都是 4 字节对齐的
-    绝对 RAM 指针（0x8010xxxx），没有相对偏移。
-  · ADV.BIN 代码只硬编码段偏移 < 0x10C8（段头 0x1F8 + 元数据区）。
-    [0, 0x10C8) 是不可移动的固定前缀；0x10C8 之后只经指针访问，可自由重排。
+  · 加载器跳过段文件头 8 字节：文件偏移 8 被放到 RAM
+    0x80100000。因此普通内部指针的文件目标 = (ptr - RAM) + 8。
+    仅段头最前两个指针字仍使用直接文件偏移。
+  · ADV.BIN 代码硬编码的运行时偏移全部 < 0x10C8，对应文件偏移
+    < 0x10D0。[0, 0x10D0) 是不可移动的固定前缀。
   · 脚本 = 4 字节对齐记录 `FF op ...`，长度查 ADV.BIN 的表（RAM 0x800BAC90，
     文件偏移 0x568F0）。跳转/文本指针操作数：FF22/23/55/58 在 +4，
     FF38/3E/49 在 +8。FF21 = 脚本结束（后面通常直接排文本）。
@@ -16,8 +17,9 @@
     只在文本 span 之外做指针重定位。
 
 重建不变量：
-  1. 固定前缀 [0, 0x10C8) 原样保留（其中的指针字仍参与重定位）。
-  2. 替换单元的新字节数 ≡ 原字节数 (mod 4)，保证后续脚本记录 4 对齐。
+  1. 固定前缀 [0, 0x10D0) 原样保留（其中的指针字仍参与重定位）。
+  2. 同一 reader span 内的单元必须无缝相接；只在 span 末尾统一补齐，使整个
+     span 的新字节数 ≡ 原字节数 (mod 4)，保证后续脚本记录 4 对齐。
   3. 所有非文本区域逐字节保留，只有指针字按新布局改写。
   4. 指向未替换区域任意内部的指针可精确映射；指向替换单元内部的指针
      目前只支持单元起点（其余情况报错，待 token 级映射）。
@@ -40,11 +42,29 @@ import containers  # noqa: E402
 
 RAM = 0x80100000
 SECTOR = 0x800
-FIXED_PREFIX = 0x10C8          # ADV.BIN 硬编码偏移的上界（lui 0x8010 普查）
+LOAD_SKIP = 8                  # 段文件 [8:] 被加载到 RAM 0x80100000
+FIXED_PREFIX = 0x10D0          # 运行时 0x10C8 + 文件头 8 字节
 ADV_LEN_TABLE_OFF = 0x568F0    # RAM 0x800BAC90
 END_OP = 0x21
 # opcode → 指针操作数在记录内的偏移
-SCRIPT_PTR_OPS = {0x22: 4, 0x23: 4, 0x55: 4, 0x58: 4, 0x38: 8, 0x3E: 8, 0x49: 8}
+SCRIPT_PTR_OPS = {
+    0x22: 4, 0x23: 4, 0x55: 4, 0x58: 4,
+    0x38: 8, 0x3E: 8, 0x49: 8,
+}
+
+
+def pointer_to_file(site: int, value: int) -> int:
+    """把段内指针字转成段文件偏移。
+
+    段头 [0, 8) 是加载器元数据，里面的值直接按文件偏移记录；
+    其余指针是加载后的 RAM 坐标，而 RAM+0 对应文件偏移 8。
+    """
+    return value - RAM if site < LOAD_SKIP else value - RAM + LOAD_SKIP
+
+
+def file_to_pointer(site: int, target: int) -> int:
+    """把段文件偏移转回指针字；与 pointer_to_file 严格互逆。"""
+    return RAM + target if site < LOAD_SKIP else RAM + target - LOAD_SKIP
 
 
 def load_len_table(adv_path: Path | None = None) -> bytes:
@@ -92,7 +112,9 @@ class Section:
                 continue
             v = struct.unpack_from("<I", self.raw, o)[0]
             if RAM <= v < RAM + self.size:
-                sites.append((o, v - RAM))
+                target = pointer_to_file(o, v)
+                if 0 <= target < self.size:
+                    sites.append((o, target))
         return sites
 
     def _text_targets(self) -> set[int]:
@@ -103,11 +125,11 @@ class Section:
         （っ/て/ね）。FF55/FF58 的指针操作数固定在记录 +4，记录 4 字节对齐。
         """
         tgts = set()
-        for site, _ in self.ptr_sites:
+        for site, target in self.ptr_sites:
             head = site - 4                          # 指针在 +4，故记录头在 site-4
             if (head >= 0 and head % 4 == 0 and self.raw[head] == 0xFF
                     and self.raw[head + 1] in (0x55, 0x58)):
-                tgts.add(struct.unpack_from("<I", self.raw, site)[0] - RAM)
+                tgts.add(target)
         return tgts
 
     def _split_units(self) -> list[tuple[int, int]]:
@@ -121,14 +143,31 @@ class Section:
 
     # -- 重建 --------------------------------------------------------------
 
-    def rebuild(self, replacements: dict[int, bytes]) -> bytes:
+    def rebuild(self, replacements: dict[int, bytes],
+                target_aliases: dict[int, tuple[int, int]] | None = None) -> bytes:
         """replacements: {unit_start: new_bytes} → 新的段内容（未做扇区填充）。
 
-        new_bytes 是完整的文本单元编码（含控制码），本函数负责 mod-4 补齐。
+        new_bytes 是完整的文本单元编码（含控制码）。单元之间绝不补零；本函数只在
+        所属 reader span 末尾统一做 mod-4 补齐。
         """
+        target_aliases = target_aliases or {}
         unknown = set(replacements) - {a for a, _ in self.units}
         if unknown:
             raise ValueError(f"未知文本单元起点: {sorted(hex(u) for u in unknown)}")
+
+        # 每个 span 只在末尾补齐。过去逐 unit 补齐会把 00 插进共享顺序流中间；
+        # FF01 后保存的流指针恢复时会把这些 00 当字符读掉，正是 mid-word resume
+        # 错位与颜色状态丢失的来源。
+        span_tail_padding = {}
+        for span_start, span_end in self.spans:
+            span_units = [(a, b) for a, b in self.units
+                          if span_start <= a and b <= span_end]
+            if not any(a in replacements for a, _ in span_units):
+                continue
+            old_len = span_end - span_start
+            new_len = sum(len(replacements[a]) if a in replacements else b - a
+                          for a, b in span_units)
+            span_tail_padding[span_units[-1][0]] = (old_len - new_len) % 4
 
         # 1) 布局：固定前缀 + 有序块（verbatim / unit），计算新偏移
         blocks = []                                  # (old_start, old_end, new_bytes|None)
@@ -138,9 +177,11 @@ class Section:
             if a > pos:
                 blocks.append((pos, a, None))
             new = replacements.get(a)
+            tail_pad = span_tail_padding.get(a, 0)
             if new is not None:
-                pad = (b - a - len(new)) % 4
-                new = new + b"\x00" * pad
+                new = new + b"\x00" * tail_pad
+            elif tail_pad:
+                new = self.raw[a:b] + b"\x00" * tail_pad
             blocks.append((a, b, new))
             pos = b
         if pos < self.size:
@@ -152,12 +193,20 @@ class Section:
         for a, b, new in blocks:
             block_map.append((a, b, len(out)))
             out.extend(new if new is not None else self.raw[a:b])
-        replaced = {a for a, b, new in blocks if new is not None}
+        # span 尾部可能只因统一 padding 而物化成 new block；它仍是 verbatim，
+        # 不能当作“内容被替换”的单元限制内部目标映射。
+        replaced = set(replacements)
 
         # 2) 旧偏移 → 新偏移。target 落在被替换单元内部时返回 None = 噪声指针，
         #    跳过重定位、原样保留其旧值（文本只被 FF55/FF58 引用且都指向单元起点；
         #    落进被换文本内部的 0x8010xxxx 一定是段头结构/文字巧合，不是真文本指针）。
         def remap(off: int, *, is_site: bool) -> "int | None":
+            if not is_site and off in target_aliases:
+                carrier, relative = target_aliases[off]
+                for a, b, ns in block_map:
+                    if a == carrier:
+                        return ns + relative
+                raise ValueError(f"alias carrier {carrier:#x} 无法映射")
             if off < FIXED_PREFIX:
                 return off
             for a, b, ns in block_map:
@@ -175,7 +224,9 @@ class Section:
             new_target = remap(target, is_site=False)
             if new_target is None:                   # 噪声指针：verbatim 已复制其旧值，不动
                 continue
-            struct.pack_into("<I", out, remap(site, is_site=True), RAM + new_target)
+            new_site = remap(site, is_site=True)
+            struct.pack_into("<I", out, new_site,
+                             file_to_pointer(site, new_target))
         return bytes(out)
 
 
@@ -195,12 +246,14 @@ class EFile:
         s0, s1 = self.sections[index]
         return Section(self.data[s0:s1], self.sec_spans[index])
 
-    def rebuild(self, replacements: dict[int, dict[int, bytes]]) -> bytes:
+    def rebuild(self, replacements: dict[int, dict[int, bytes]],
+                target_aliases: dict[int, dict[int, tuple[int, int]]] | None = None) -> bytes:
         """replacements: {section_index: {unit_start: new_bytes}} → 新 E 文件。"""
+        target_aliases = target_aliases or {}
         new_secs = []
         for i, (s0, s1) in enumerate(self.sections):
             sec = Section(self.data[s0:s1], self.sec_spans[i])
-            body = sec.rebuild(replacements.get(i, {}))
+            body = sec.rebuild(replacements.get(i, {}), target_aliases.get(i, {}))
             # 段尾去零，再填充到扇区倍数
             content = len(body.rstrip(b"\x00"))
             sectors = max(1, -(-content // SECTOR))
@@ -220,7 +273,10 @@ class EFile:
         head = bytearray(self.data[:SECTOR])
         for i, v in enumerate(directory):
             struct.pack_into("<H", head, i * 2, v)
-        # 目录之后、原表尾部如果有非递增哨兵值，保持原样（read 到非递增即停）
+        # E 文件还保存一个“最后一段结束扇区”。它在原文件中恰好等于文件
+        # 总扇区数，所以 split_sections 会把它当 end sentinel，而不是新 section。
+        # 任一 section 扩容后必须同步更新；留下旧值会把尾部切错，甚至凭空多出一段。
+        struct.pack_into("<H", head, len(directory) * 2, sector_pos)
         return bytes(head) + b"".join(new_secs)
 
 

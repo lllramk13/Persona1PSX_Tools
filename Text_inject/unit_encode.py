@@ -132,7 +132,6 @@ def encode_span_units(ef: EFile, section: int, span_index: int, zh: str,
         raise E.EncodeError(
             f"译文只消费 {close_index}/{len(close_pads)} 个 FF01 padding 记录")
 
-    # FF03 只移动光标，排版器可以添加；其余控制码必须原序原数。
     keep = lambda seq: [item for item in E._meaningful_controls(seq, ctrl)
                         if item[0] != 0x03]
     if keep(combined) != keep(original):

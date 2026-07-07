@@ -15,6 +15,7 @@ FSECT/FSIZE.DAT）的地方。也可当库用：read_user_data / write_user_data
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 from pathlib import Path
 
@@ -24,13 +25,17 @@ ROOT = HERE.parent
 REPO = ROOT.parent
 DISC_DIR = REPO / "Game" / "P1_PSX"
 DISC_SOURCE = DISC_DIR / "Megami Ibunroku - Persona - Be Your True Mind (Japan) (Rev 1).bin"
-DISC_OUTPUT = DISC_DIR / "Persona (Japan) (Rev 1) [ZH-test].bin"
+DISC_OUTPUT = Path(os.environ.get(
+    "P1_DISC_OUTPUT",
+    DISC_DIR / "Persona (Japan) (Rev 1) [ZH-test].bin"))
 
 SECTOR_SIZE = 2352
 USER_OFFSET = 24
 USER_SIZE = 2048
 
 PATCHES = (
+    ("SLPS_005.00", 1314, ROOT / "extrac" / "SLPS_005.00",
+     HERE / "out" / "SLPS.patched.BIN"),
     ("FONT.BIN", 602, ROOT / "extrac" / "FONT.BIN", HERE / "out" / "FONT.patched.BIN"),
     ("ADV/E0.BIN", 87074, ROOT / "extrac" / "ADV" / "E0.BIN", HERE / "out" / "E0.patched.BIN"),
 )

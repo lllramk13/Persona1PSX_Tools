@@ -10,14 +10,16 @@ FONT.BIN 字形格式（实测，见 README §1.4）：
 """
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from sync_json import read_json, write_json
+try:
+    from .sync_json import read_json, write_json
+except ImportError:  # 兼容 `cd Text_inject && python3 build_font.py`
+    from sync_json import read_json, write_json
 from collections import defaultdict
 import re
-from opencc import OpenCC
 import unicodedata
 
 HERE = Path(__file__).resolve().parent
-TTF = HERE / "wqy-zenhei.ttc"
+TTF = HERE / "font" / "SourceHanSansSC-Normal.otf"  # zpix.ttf / WenQuanYi.Bitmap.Song.16px.ttf / wqy-zenhei.ttc
 
 
 def render_glyph(ch: str, font: ImageFont.FreeTypeFont) -> bytes:
@@ -104,7 +106,12 @@ def create_codetable_zh(counter, og):
     write_json(HERE.parent / "Codetable" / "codetable_zh.json", og_data)
 
 
-def render_font(out_path=None):
+def render_font(out_path=None, redraw_all=False):
+    """渲染中文字库。
+
+    默认只重画与原码表不同的槽；``redraw_all=True`` 时，
+    所有非空槽都使用当前 TTF 重画，避免原版/中文字形混用。
+    """
     og = read_json(HERE.parent / "Codetable" / "codetable_og.json")
     zh = read_json(HERE.parent / "Codetable" / "codetable_zh.json")
     buf = bytearray((HERE.parent / "extrac" / "FONT.BIN").read_bytes())
@@ -114,13 +121,16 @@ def render_font(out_path=None):
     font = ImageFont.truetype(str(TTF), 14)
     changed = 0
     for slot, ch in zh.items():
-        if og.get(slot) == ch:
+        if not ch:
+            continue
+        if not redraw_all and og.get(slot) == ch:
             continue
         i = int(slot) * 32
         buf[i:i + 32] = render_glyph(ch, font)
         changed += 1
 
-    print(f"重渲了 {changed} 个槽，字库仍 {len(buf)} 字节")
+    mode = "全量" if redraw_all else "差异"
+    print(f"{mode}重渲了 {changed} 个槽，字库仍 {len(buf)} 字节")
     if out_path:
         Path(out_path).write_bytes(buf)
     return bytes(buf)
@@ -156,6 +166,8 @@ def unicode_normalize(s:str) -> str:
 
 
 if __name__ == "__main__":
+    from opencc import OpenCC
+
     counter = count_word("ADV/E0", HERE.parent / "Text" / "translations.json")
     for ch, count in sorted(counter.items(), key=lambda x:x[1], reverse=True)[:10]:
         print(ch, ":", count)
